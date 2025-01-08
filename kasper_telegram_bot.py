@@ -58,7 +58,7 @@ USER_MESSAGE_LIMITS = defaultdict(lambda: {"count": 0, "reset_time": datetime.ut
 # In-memory Session Store
 #######################################
 # user_id -> {
-#   "ws": websocket.WebSocketClientProtocol or None,
+#   "ws": websockets.WebSocketClientProtocol or None,
 #   "persona": str (the KASPER persona text),
 # }
 USER_SESSIONS = {}

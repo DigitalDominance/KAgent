@@ -1,11 +1,8 @@
+websocket-client==1.5.2
 python-telegram-bot==20.3
 requests==2.31.0
 pydub==0.25.1
 elevenlabs==1.50.3
 websockets==11.0.3
-websocket-client==1.5.2
 openai
 httpx
-elevenlabs
-asyncio
-signal
