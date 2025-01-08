@@ -1,6 +1,5 @@
 import logging
 import os
-import requests
 from io import BytesIO
 from datetime import datetime, timedelta
 
@@ -13,6 +12,10 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
+
+# ElevenLabs imports (Python SDK)
+from elevenlabs import ElevenLabs
+from elevenlabs.conversational_ai.conversation import Conversation, AgentResponse
 
 ##############################
 # Logging
@@ -31,63 +34,15 @@ ELEVEN_LABS_API_KEY = os.environ.get("ELEVEN_LABS_API_KEY", "")
 ELEVEN_LABS_AGENT_ID = os.environ.get("ELEVEN_LABS_AGENT_ID", "")
 
 ##############################
-# Eleven Labs: Conversations
+# Eleven Labs: Python SDK
 ##############################
 
-def converse_with_elevenlabs(user_input: str, conversation_id: str = None) -> dict:
-    """
-    Calls POST /v1/convai/conversations with:
-      - agent_id
-      - input (the user text)
-      - optionally conversation_id if continuing
-    Returns JSON including:
-      - conversation_id
-      - history (list of messages)
-      - outputs (list of {text, voice_id, generation_id})
-    """
-    url = "https://api.elevenlabs.io/v1/convai/conversations"
-    headers = {
-        "xi-api-key": ELEVEN_LABS_API_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "agent_id": ELEVEN_LABS_AGENT_ID,
-        "input": user_input
-    }
-    if conversation_id:
-        payload["conversation_id"] = conversation_id
+# Create a single client for all conversations
+client = ElevenLabs(api_key=ELEVEN_LABS_API_KEY)
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Error while calling Eleven Labs conversations: {e}")
-        return {}
-
-def fetch_audio_mp3(conversation_id: str, voice_id: str, generation_id: str) -> bytes:
-    """
-    Calls GET /v1/convai/conversations/{conversation_id}/audio
-    ?voice_id=...&generation_id=...
-    Returns raw MP3 bytes from Eleven Labs.
-    """
-    url = (
-        f"https://api.elevenlabs.io/v1/convai/conversations/{conversation_id}/audio"
-        f"?voice_id={voice_id}&generation_id={generation_id}"
-    )
-    headers = {
-        "xi-api-key": ELEVEN_LABS_API_KEY
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return resp.content  # MP3 data
-    except Exception as e:
-        logger.error(f"Error fetching audio from Eleven Labs: {e}")
-        return b""
-
+##############################
+# Utility: Convert MP3 to OGG
+##############################
 def convert_mp3_to_ogg(mp3_bytes: bytes) -> BytesIO:
     """
     Converts MP3 bytes to OGG/Opus for Telegram voice notes.
@@ -110,24 +65,37 @@ def convert_mp3_to_ogg(mp3_bytes: bytes) -> BytesIO:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /start - Resets conversation_id and rate-limit counters for this user.
+    Also creates a new ElevenLabs Conversation object.
     """
-    context.user_data["conversation_id"] = None
+    # Clear rate limit data
     context.user_data["limit_start_time"] = None
     context.user_data["response_count"] = 0
 
+    # Create a new Conversation instance from the ElevenLabs SDK
+    conversation = Conversation(
+        client=client,
+        agent_id=ELEVEN_LABS_AGENT_ID,
+        requires_auth=bool(ELEVEN_LABS_API_KEY),
+        # We won't use DefaultAudioInterface because
+        # we're in Telegram, not local mic/speaker usage
+    )
+    # (Optionally) start_session if you want to force a new session:
+    # conversation.start_session()
+
+    context.user_data["conversation"] = conversation
+
     await update.message.reply_text(
-        "Hello! I'm Kasper (Eleven Labs Agent). How can I help you today?"
+        "Hello! I'm Kasper. The Friendly Ghost of KRC20!"
     )
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     1. Enforce rate-limiting (15 responses / 24 hours).
-    2. Send user text to Eleven Labs conversation.
-    3. Parse the reply -> outputs array -> get text + audio.
-    4. If there's audio, fetch it, convert, and send to user.
+    2. If we have an ElevenLabs Conversation, send user text to it.
+    3. Get the agent's text + optional TTS audio, and send both to the user.
     """
 
-    # -- RATE LIMITING LOGIC -- #
+    # --- RATE LIMITING LOGIC --- #
     limit_start_time = context.user_data.get("limit_start_time")
     response_count = context.user_data.get("response_count", 0)
 
@@ -155,54 +123,37 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # If below limit, increment response_count
     context.user_data["response_count"] = response_count + 1
 
-    # -- ELEVEN LABS CONVERSATION -- #
-    user_text = update.message.text
-    conversation_id = context.user_data.get("conversation_id", None)
+    # --- ELEVEN LABS CONVERSATION LOGIC --- #
+    if "conversation" not in context.user_data:
+        await update.message.reply_text("Please type /start to begin your session.")
+        return
 
-    # 1) POST /v1/convai/conversations
-    response_data = converse_with_elevenlabs(user_text, conversation_id)
-    if not response_data:
+    conversation: Conversation = context.user_data["conversation"]
+
+    user_text = update.message.text.strip()
+    if not user_text:
+        return
+
+    try:
+        # Send the user's message to the conversation
+        # This should return the agent's text reply and (optionally) audio data
+        agent_reply: str = conversation.user_message(user_text)
+
+        # Send agent text to Telegram
+        await update.message.reply_text(agent_reply)
+
+        # If the conversation generated audio for this message, we can retrieve it:
+        # 'last_generation' is an AgentResponse that might contain .audio bytes
+        last_gen: AgentResponse = conversation.last_generation
+        if last_gen and last_gen.audio:
+            # Convert MP3 -> OGG
+            ogg_data = convert_mp3_to_ogg(last_gen.audio)
+            if ogg_data.getbuffer().nbytes > 0:
+                await update.message.reply_voice(voice=ogg_data)
+
+    except Exception as e:
+        logger.error(f"Error handling conversation: {e}")
         await update.message.reply_text("Sorry, I'm having trouble connecting to the Agent.")
-        return
-
-    # Possibly update conversation_id
-    new_conversation_id = response_data.get("conversation_id")
-    if new_conversation_id:
-        context.user_data["conversation_id"] = new_conversation_id
-
-    # The response JSON might look like:
-    # {
-    #   "conversation_id": "...",
-    #   "history": [...],
-    #   "outputs": [
-    #       {
-    #         "text": "...",
-    #         "voice_id": "...",
-    #         "generation_id": "..."
-    #       }
-    #   ]
-    # }
-    outputs = response_data.get("outputs", [])
-    if not outputs:
-        await update.message.reply_text("No output from the Agent.")
-        return
-
-    # Grab the latest output
-    latest = outputs[-1]  # last item
-    agent_text = latest.get("text", "")
-    voice_id = latest.get("voice_id")
-    generation_id = latest.get("generation_id")
-
-    # 2) Send the Agent's text to user
-    await update.message.reply_text(agent_text)
-
-    # 3) If we have voice_id & generation_id, fetch audio (MP3) and convert to OGG
-    if voice_id and generation_id:
-        mp3_data = fetch_audio_mp3(new_conversation_id, voice_id, generation_id)
-        if mp3_data:
-            ogg_buffer = convert_mp3_to_ogg(mp3_data)
-            if ogg_buffer.getbuffer().nbytes > 0:
-                await update.message.reply_voice(voice=ogg_buffer)
 
 ##############################
 # Main Bot
@@ -218,7 +169,7 @@ def main():
     # Text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logging.info("Kasper Telegram Bot is running with rate limiting & Eleven Labs conversations.")
+    logging.info("Kasper Telegram Bot is running with rate limiting & Eleven Labs (Python SDK).")
     app.run_polling()
 
 if __name__ == "__main__":
