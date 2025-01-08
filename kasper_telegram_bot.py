@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from io import BytesIO
 import signal
+import traceback
 
 import httpx
 import websockets
@@ -20,6 +21,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import TelegramError, BadRequest
 
 #######################################
 # Logging Setup
@@ -90,7 +92,8 @@ def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
             ogg_buffer,
             format="ogg",
             codec="libopus",  # Changed from 'opus' to 'libopus'
-            bitrate="64k"
+            bitrate="64k",
+            parameters=["-vbr", "on"]  # Enable Variable Bitrate for better quality
         )
         ogg_buffer.seek(0)
         logger.info("MP3 successfully converted to OGG.")
@@ -321,8 +324,25 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         ogg_bytes = BytesIO(ogg_buffer)
         ogg_bytes.name = "voice.ogg"  # Telegram requires a filename
         ogg_bytes.seek(0)  # Reset buffer position
-        await update.message.reply_voice(voice=ogg_bytes)
-        logger.info("Sent voice message to user.")
+
+        try:
+            await update.message.reply_voice(voice=ogg_bytes)
+            logger.info("Sent voice message to user.")
+        except BadRequest as e:
+            if "Voice_messages_forbidden" in str(e):
+                logger.error(f"Voice messages are forbidden for user {user_id}.")
+                await update.message.reply_text(
+                    "❌ I can't send voice messages to you. Please check your Telegram settings or try sending a different type of message."
+                )
+            else:
+                logger.error(f"BadRequest error for user {user_id}: {e}")
+                await update.message.reply_text("❌ An error occurred while sending the voice message. Please try again later.")
+        except TelegramError as e:
+            logger.error(f"TelegramError for user {user_id}: {e}")
+            await update.message.reply_text("❌ An unexpected error occurred while sending the voice message. Please try again later.")
+        except Exception as e:
+            logger.error(f"Unhandled exception while sending voice message for user {user_id}: {e}")
+            await update.message.reply_text("❌ An error occurred while sending the voice message. Please try again later.")
 
         # Inform the user about remaining messages
         if remaining > 0:
@@ -332,6 +352,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except Exception as e:
         logger.error(f"Error handling message from user {user_id}: {e}")
+        logger.debug(traceback.format_exc())
         await update.message.reply_text("❌ An error occurred while processing your message. Please try again later.")
 
 #######################################
@@ -364,6 +385,7 @@ def main():
         application.run_polling()
     except Exception as e:
         logger.error(f"Application encountered an error: {e}")
+        logger.debug(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
