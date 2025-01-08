@@ -1,9 +1,12 @@
-import logging
 import os
-import threading
-from datetime import datetime
+import logging
 import asyncio
+import base64
+from datetime import datetime
 from io import BytesIO
+
+import websockets
+from websockets import WebSocketClientProtocol
 
 from pydub import AudioSegment
 from telegram import Update
@@ -15,258 +18,291 @@ from telegram.ext import (
     filters
 )
 
-from elevenlabs.client import ElevenLabs
-from elevenlabs.conversational_ai.conversation import (
-    Conversation,
-    AudioInterface
-)
-
-##########################
+########################
 # Logging
-##########################
+########################
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-##########################
-# Environment Vars
-##########################
+########################
+# Env Vars
+########################
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
-ELEVEN_LABS_AGENT_ID = os.getenv("ELEVEN_LABS_AGENT_ID", "")
+ELEVEN_LABS_AGENT_ID = os.getenv("ELEVEN_LABS_AGENT_ID", "")  # For public agent
+# If your agent is private, you'll need to get a "signed_url" from your server:
+#  wss://api.elevenlabs.io/v1/convai/conversation?agent_id=...&token=...
 
-##########################
-# ElevenLabs Client
-##########################
-client = ElevenLabs(api_key=ELEVEN_LABS_API_KEY)
+########################
+# Rate Limit: 15 / 24h
+########################
+MAX_MESSAGES = 15
 
-##########################
+########################
 # Data Structures
-##########################
-# We'll store the final agent text for each user ID,
-# plus the final MP3 for each user ID once the agent stops speaking.
-USER_AGENT_TEXT = {}      # { user_id: str }
-USER_AGENT_AUDIO = {}     # { user_id: bytes (final MP3) }
+########################
 
-##########################
-# TelegramAudioInterface
-##########################
-class TelegramAudioInterface(AudioInterface):
+# We'll keep a dictionary: { user_id: { "ws": <websocket>, ... } }
+# - "ws": the active WebSocketClientProtocol
+# - "audio_buffer": bytes accumulative from audio chunks
+# - "rate_start": datetime
+# - "message_count": int
+# - "is_listening": bool (true if we keep the session open)
+# etc.
+
+USER_SESSIONS = {}
+
+########################
+# WebSocket Manager
+########################
+
+async def send_user_transcript(ws: WebSocketClientProtocol, transcript: str):
     """
-    Custom AudioInterface that:
-    - Doesn't record or play local audio.
-    - Accumulates TTS audio chunks in memory.
-    - When agent stops speaking, we finalize the buffer so the bot can send it to Telegram.
+    Send a user_transcript message over the WS:
+    {
+      "user_transcript": "Hello!"
+    }
     """
+    msg = {"user_transcript": transcript}
+    await ws.send(str(msg))  # or use json.dumps(msg)
 
-    def __init__(self, user_id: int):
-        super().__init__()
-        self.user_id = user_id
-        self._buffer = BytesIO()   # accumulates partial audio
-        self._recording = False
-
-    def start(self):
-        # Agent is about to speak
-        logger.info(f"AudioInterface.start() for user {self.user_id}")
-        self._recording = True
-        self._buffer = BytesIO()
-
-    def stop(self):
-        # Agent finished speaking
-        logger.info(f"AudioInterface.stop() for user {self.user_id}")
-        self._recording = False
-
-        # The entire MP3 is in self._buffer now
-        mp3_data = self._buffer.getvalue()
-        USER_AGENT_AUDIO[self.user_id] = mp3_data
-
-        # Clear the buffer for next time
-        self._buffer = BytesIO()
-
-    def interrupt(self):
-        # If user interrupts the agent
-        logger.info(f"AudioInterface.interrupt() for user {self.user_id}")
-        self._recording = False
-
-    def output(self, audio_bytes: bytes):
-        # Called repeatedly with partial chunks
-        if self._recording:
-            self._buffer.write(audio_bytes)
-
-    def record_audio(self) -> bytes:
-        # We don't capture user mic in Telegram
-        return b""
-
-    def play_audio(self, audio_bytes: bytes, sample_rate: int, sample_width: int, channels: int):
-        # We don't play local audio
-        pass
-
-
-##########################
-# Callbacks
-##########################
-def run_conversation_loop(conversation: Conversation):
+def decode_base64_audio(audio_base64: str) -> bytes:
     """
-    Runs in background thread: start_session, wait_for_session_end.
+    Decodes the base64 audio from ElevenLabs.
+    Could be raw PCM or MP3, check 'agent_output_audio_format' in conversation_initiation_metadata
+    In the docs, default is 'pcm_16000' for agent output, but it might differ.
     """
-    logger.info("Starting conversation session (streaming) ...")
-    conversation.start_session()
-    logger.info("Session started, now waiting for end ...")
-    cid = conversation.wait_for_session_end()
-    logger.info(f"Conversation ended. ID={cid}")
+    return base64.b64decode(audio_base64)
 
-def make_callback_agent_response(user_id: int):
+def convert_to_ogg(audio_bytes: bytes, is_pcm_16k: bool = True) -> BytesIO:
     """
-    Returns a function that handles agent text responses.
-    We'll store the final text in USER_AGENT_TEXT[user_id].
+    If it's PCM 16k, we need to wrap it in a WAV or do something before pydub can read it.
+    If it's MP3, we can parse directly, etc.
     """
-    def callback(response_text: str):
-        logger.info(f"[Agent partial/final text] user={user_id}, text={response_text}")
-        # For simplicity, we store the entire response in a single var
-        # The agent might produce partial text, then final text.
-        # You can refine logic if needed.
-        USER_AGENT_TEXT[user_id] = response_text
-    return callback
-
-
-##########################
-# Utility: MP3->OGG
-##########################
-def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
     try:
-        mp3_file = BytesIO(mp3_data)
-        segment = AudioSegment.from_file(mp3_file, format="mp3")
-        ogg_buffer = BytesIO()
-        segment.export(ogg_buffer, format="ogg", codec="opus")
-        ogg_buffer.seek(0)
-        return ogg_buffer
+        if is_pcm_16k:
+            # For simplicity, wrap raw PCM in a WAV container or do a pydub workaround.
+            # Quick approach: create a WAV file in memory with correct headers, then load.
+            # We'll skip advanced details here. 
+            # If your agent actually returns MP3, just treat it as MP3.
+            logger.info("Converting from raw PCM 16k to OGG.")
+            # We'll do a naive approach using pydub's raw data. 
+            segment = AudioSegment(
+                data=audio_bytes,
+                sample_width=2,      # 16-bit = 2 bytes
+                frame_rate=16000,
+                channels=1
+            )
+        else:
+            # Possibly MP3
+            logger.info("Assuming MP3 data.")
+            segment = AudioSegment.from_file(BytesIO(audio_bytes), format="mp3")
+
+        # Now export OGG
+        ogg_buf = BytesIO()
+        segment.export(ogg_buf, format="ogg", codec="opus")
+        ogg_buf.seek(0)
+        return ogg_buf
+
     except Exception as e:
         logger.error(f"Audio conversion error: {e}")
         return BytesIO()
 
+async def websocket_listener(user_id: int):
+    """
+    Background task: Connect to ElevenLabs WebSocket, keep reading messages,
+    store final text + final audio in memory, then the bot can send to Telegram.
+    """
+    session = USER_SESSIONS[user_id]
+    agent_id = ELEVEN_LABS_AGENT_ID
 
-##########################
-# Telegram Handlers
-##########################
+    # For public agents:
+    ws_url = f"wss://api.elevenlabs.io/v1/convai/conversation?agent_id={agent_id}"
+    # If private, get a signed URL from your server.
+
+    logger.info(f"User {user_id}: connecting to {ws_url}")
+
+    async with websockets.connect(ws_url) as ws:
+        session["ws"] = ws
+        session["audio_buffer"] = b""
+        session["is_listening"] = True
+
+        # The server sends messages indefinitely until conversation ends
+        # We'll keep reading in a loop.
+        try:
+            async for raw_msg in ws:
+                # raw_msg is a string; parse it
+                # The docs show messages like:
+                # {
+                #   "type": "audio",
+                #   "audio_event": { "audio_base_64": "...", "event_id": 67890 }
+                # }
+                # Or agent_response, user_transcript, etc.
+                raw_msg = raw_msg.strip()
+                logger.debug(f"WS >> {raw_msg}")
+
+                if raw_msg.startswith("{"):
+                    # Very naive approach: parse as Python dict
+                    # You should do: data = json.loads(raw_msg)
+                    import json
+                    data = json.loads(raw_msg)
+                    msg_type = data.get("type", "")
+
+                    if msg_type == "conversation_initiation_metadata":
+                        # e.g. { "conversation_id": "...", "agent_output_audio_format": "pcm_16000" }
+                        pass
+                    elif msg_type == "agent_response":
+                        # final text
+                        agent_text = data["agent_response_event"]["agent_response"]
+                        logger.info(f"User {user_id} agent text: {agent_text}")
+                        # We store it so the Telegram handler can send it.
+                        session["last_agent_text"] = agent_text
+
+                    elif msg_type == "audio":
+                        # partial chunk
+                        chunk_b64 = data["audio_event"]["audio_base_64"]
+                        chunk_bytes = decode_base64_audio(chunk_b64)
+                        # We'll accumulate in session["audio_buffer"]
+                        session["audio_buffer"] += chunk_bytes
+
+                    elif msg_type == "interruption":
+                        # means agent got interrupted
+                        pass
+
+                    elif msg_type == "ping":
+                        # The docs say we might respond with a "pong"
+                        event_id = data["ping_event"]["event_id"]
+                        pong_msg = {
+                            "type": "pong",
+                            "event_id": event_id
+                        }
+                        await ws.send(str(pong_msg))
+
+                    elif msg_type in ("user_transcript", "internal_tentative_agent_response"):
+                        # Probably partial user transcripts or partial agent text
+                        pass
+
+                    # etc. handle more event types if you want
+
+        except websockets.ConnectionClosed:
+            logger.info(f"User {user_id}: WebSocket closed.")
+        finally:
+            session["is_listening"] = False
+            session["ws"] = None
+
+    logger.info(f"User {user_id}: WS task complete.")
+
+########################
+# Telegram Bot
+########################
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /start -> reset rate limit, create new conversation in a background thread.
+    /start -> reset rate limit, create a session in USER_SESSIONS, spawn a WS listener.
     """
     user_id = update.effective_user.id
-    context.user_data["limit_start_time"] = None
-    context.user_data["response_count"] = 0
+    USER_SESSIONS[user_id] = {
+        "ws": None,
+        "audio_buffer": b"",
+        "last_agent_text": "",
+        "rate_start": None,
+        "message_count": 0,
+        "is_listening": False
+    }
 
-    # Create a new audio interface per user
-    audio_interface = TelegramAudioInterface(user_id)
+    await update.message.reply_text("Hello! I've started a new ElevenLabs WebSocket session. You have 15 messages every 24 hours. Ask away!")
 
-    # Build the conversation
-    conversation = Conversation(
-        client=client,
-        agent_id=ELEVEN_LABS_AGENT_ID,
-        requires_auth=bool(ELEVEN_LABS_API_KEY),
-        audio_interface=audio_interface,
-        callback_agent_response=make_callback_agent_response(user_id),
-        # callback_agent_response_correction=..., etc. if needed
-    )
-
-    # Save the conversation in user_data
-    context.user_data["conversation"] = conversation
-
-    # Start session in background thread
-    t = threading.Thread(target=run_conversation_loop, args=(conversation,))
-    t.daemon = True
-    t.start()
-
-    await update.message.reply_text("New ElevenLabs conversation started. You have 15 daily messages. Ask away!")
+    # Spawn the websocket_listener in the background
+    asyncio.create_task(websocket_listener(user_id))
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    1. Rate-limit check
-    2. Put text into conversation.input_text_queue
-    3. Wait briefly, then fetch agent's final text & audio
-    4. Send to user
+    1. Rate-limit 15 per 24h
+    2. Send user transcript over WS
+    3. Wait briefly, fetch agent text + audio
+    4. Send to Telegram
     """
     user_id = update.effective_user.id
+    if user_id not in USER_SESSIONS:
+        await update.message.reply_text("Please type /start first to begin.")
+        return
 
-    # --- Rate limiting ---
-    limit_start_time = context.user_data.get("limit_start_time")
-    response_count = context.user_data.get("response_count", 0)
+    session = USER_SESSIONS[user_id]
 
-    if not limit_start_time:
-        context.user_data["limit_start_time"] = datetime.now()
-        context.user_data["response_count"] = 0
+    # Rate limit check
+    if session["rate_start"] is None:
+        session["rate_start"] = datetime.now()
+        session["message_count"] = 0
     else:
-        elapsed = datetime.now() - limit_start_time
+        elapsed = datetime.now() - session["rate_start"]
         if elapsed.total_seconds() >= 24 * 3600:
-            context.user_data["limit_start_time"] = datetime.now()
-            context.user_data["response_count"] = 0
-            response_count = 0
+            session["rate_start"] = datetime.now()
+            session["message_count"] = 0
 
-    if response_count >= 15:
-        await update.message.reply_text(
-            "You have used all 15 responses for the day. "
-            "Please wait 24 hours from your first usage to continue."
-        )
+    if session["message_count"] >= MAX_MESSAGES:
+        await update.message.reply_text("You have used your 15 daily messages. Wait 24h to continue.")
         return
 
-    context.user_data["response_count"] = response_count + 1
+    session["message_count"] += 1
 
-    # Check conversation
-    if "conversation" not in context.user_data:
-        await update.message.reply_text("Please type /start first.")
+    # If WS not connected or listening, ask them to /start again
+    if not session["is_listening"] or session["ws"] is None:
+        await update.message.reply_text("WebSocket not connected or ended. Please /start again.")
         return
-
-    conversation: Conversation = context.user_data["conversation"]
 
     user_text = update.message.text.strip()
     if not user_text:
         return
 
-    # Put text into the queue
-    logger.info(f"User {user_id} input_text_queue: {user_text}")
-    conversation.input_text_queue.put(user_text)
+    # Send transcript
+    await update.message.reply_text("Got it. Let me think...")
 
-    # Let user know we got the message
-    await update.message.reply_text("Got it, thinking...")
+    try:
+        ws = session["ws"]
+        # We'll send a user_transcript message
+        msg = {
+          "user_transcript": user_text
+        }
+        import json
+        await ws.send(json.dumps(msg))
+    except Exception as e:
+        logger.error(f"Failed to send user_transcript: {e}")
+        await update.message.reply_text("Something went wrong sending text to the agent.")
+        return
 
-    # The agent will produce partial/final text in callback_agent_response,
-    # and TTS audio in audio_interface output -> stored in USER_AGENT_AUDIO.
+    # We'll wait a bit for the agent
+    await asyncio.sleep(3.0)  # arbitrary wait
 
-    # We'll wait a little bit for the agent to respond
-    await asyncio.sleep(2.0)
-
-    # Retrieve agent text from dictionary
-    agent_text = USER_AGENT_TEXT.get(user_id)
+    agent_text = session.get("last_agent_text", "")
     if agent_text:
         await update.message.reply_text(agent_text)
-    else:
-        await update.message.reply_text("No text reply from the agent yet. Try waiting or asking again.")
 
-    # Check if we have final MP3 audio
-    mp3_data = USER_AGENT_AUDIO.get(user_id)
-    if mp3_data and len(mp3_data) > 0:
-        # Convert to OGG
-        ogg_data = convert_mp3_to_ogg(mp3_data)
+    # If there's new audio in session["audio_buffer"], convert to OGG and send
+    audio_buf = session["audio_buffer"]
+    if audio_buf and len(audio_buf) > 0:
+        # Convert PCM or MP3 to OGG
+        # The doc says default is "pcm_16000" - let's assume that:
+        ogg_data = convert_to_ogg(audio_buf, is_pcm_16k=True)
         if ogg_data.getbuffer().nbytes > 0:
             await update.message.reply_voice(voice=ogg_data)
 
-        # Clear the stored MP3 so we don't resend it next time
-        USER_AGENT_AUDIO[user_id] = b""
+        # Clear audio buffer so we don't send it again next time
+        session["audio_buffer"] = b""
 
-##########################
-# Main Bot
-##########################
+    # If agent is still streaming, partial audio might come after the wait,
+    # so you can repeat or let the user ask another question.
+
+########################
+# Main
+########################
 def main():
-    from telegram.ext import ApplicationBuilder
-
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logger.info("Kasper Telegram Bot with streaming-based ElevenLabs conversation.")
+    logger.info("Starting Telegram bot with raw WebSocket ElevenLabs approach.")
     app.run_polling()
 
 if __name__ == "__main__":
