@@ -10,7 +10,7 @@ import httpx
 import websockets
 from pydub import AudioSegment
 
-from telegram import Update, Voice
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -39,13 +39,13 @@ MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "15"))
 #######################################
 # GPT 4-o Mini Realtime
 #######################################
-REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"  # The short model name you said you'd use
+REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"  # Replace with your actual model name
 GPT_WS_URL = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 
 #######################################
 # ElevenLabs TTS
 #######################################
-ELEVEN_LABS_VOICE_ID = "X6Hd6garE7rwoQExOLCe"  # Example KASPER voice ID
+ELEVEN_LABS_VOICE_ID = "X6Hd6garE7rwoQExOLCe"  # Replace with your actual KASPER voice ID
 ELEVEN_LABS_TTS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_LABS_VOICE_ID}"
 
 #######################################
@@ -313,8 +313,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 #######################################
 # Main Bot
 #######################################
-async def main():
-    # Build the Telegram application
+def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Add handlers
@@ -322,12 +321,9 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit.")
-    
-    # Run the bot until Ctrl+C or process termination
-    await application.run_polling()
+
+    # Run the bot
+    application.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped manually.")
+    main()
