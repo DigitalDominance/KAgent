@@ -2,7 +2,6 @@ import os
 import json
 import logging
 import asyncio
-import signal
 from datetime import datetime, timedelta
 from collections import defaultdict
 from io import BytesIO
@@ -294,8 +293,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         ogg_file = convert_mp3_to_ogg(mp3_data)
 
         # Send voice message
-        voice = Voice(file=ogg_file)
-        await update.message.reply_voice(voice=voice)
+        ogg_buffer = ogg_file.getvalue()
+        if ogg_buffer:
+            ogg_bytes = BytesIO(ogg_buffer)
+            await update.message.reply_voice(voice=ogg_bytes)
+        else:
+            logger.info("No TTS audio or conversion failed.")
 
         # Inform the user about remaining messages
         if remaining > 0:
@@ -308,17 +311,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("An error occurred while processing your message. Please try again later.")
 
 #######################################
-# Graceful Shutdown Handling
-#######################################
-async def shutdown_signal_handler(signame, application):
-    """
-    Handles shutdown signals for graceful termination.
-    """
-    logger.info(f"Received signal {signame}: initiating graceful shutdown")
-    await application.stop()
-    await application.shutdown()
-
-#######################################
 # Main Bot
 #######################################
 async def main():
@@ -329,15 +321,9 @@ async def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    # Register signal handlers for graceful shutdown
-    loop = asyncio.get_running_loop()
-    for signame in {'SIGINT', 'SIGTERM'}:
-        loop.add_signal_handler(
-            getattr(signal, signame),
-            lambda signame=signame: asyncio.create_task(shutdown_signal_handler(signame, application))
-        )
-
     logger.info("KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit.")
+    
+    # Run the bot until Ctrl+C or process termination
     await application.run_polling()
 
 if __name__ == "__main__":
