@@ -49,7 +49,7 @@ GPT_WS_URL = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 #######################################
 # ElevenLabs TTS
 #######################################
-ELEVEN_LABS_VOICE_ID = "X6Hd6garE7rwoQExOLCe"  # Replace with your actual KASPER voice ID
+ELEVEN_LABS_VOICE_ID = "0whGLe6wyQ2fwT9M40ZY"  # Replace with your actual KASPER voice ID
 ELEVEN_LABS_TTS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_LABS_VOICE_ID}"
 
 #######################################
