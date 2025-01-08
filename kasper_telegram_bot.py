@@ -89,7 +89,7 @@ def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
         segment.export(
             ogg_buffer,
             format="ogg",
-            codec="opus",
+            codec="libopus",  # Changed from 'opus' to 'libopus'
             bitrate="64k"
         )
         ogg_buffer.seek(0)
