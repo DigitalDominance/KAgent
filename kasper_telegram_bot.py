@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict
 from io import BytesIO
@@ -10,7 +11,7 @@ import httpx
 import websockets
 from pydub import AudioSegment
 
-from telegram import Update, Voice
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -63,6 +64,17 @@ USER_MESSAGE_LIMITS = defaultdict(lambda: {"count": 0, "reset_time": datetime.ut
 USER_SESSIONS = {}
 
 #######################################
+# Check ffmpeg Availability
+#######################################
+def check_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        logger.info("ffmpeg is installed and accessible.")
+    except Exception as e:
+        logger.error("ffmpeg is not installed or not accessible.")
+        raise e
+
+#######################################
 # Convert MP3 -> OGG
 #######################################
 def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
@@ -80,6 +92,7 @@ def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
             bitrate="64k"
         )
         ogg_buffer.seek(0)
+        logger.info("MP3 successfully converted to OGG.")
         return ogg_buffer
     except Exception as e:
         logger.error(f"Audio conversion error: {e}")
@@ -102,8 +115,10 @@ async def elevenlabs_tts(text: str) -> bytes:
     }
     async with httpx.AsyncClient() as client:
         try:
+            logger.info("Sending request to ElevenLabs TTS API.")
             resp = await client.post(ELEVEN_LABS_TTS_URL, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
+            logger.info("Received response from ElevenLabs TTS API.")
             return resp.content  # raw MP3
         except Exception as e:
             logger.error(f"Error calling ElevenLabs TTS: {e}")
@@ -131,7 +146,7 @@ async def openai_realtime_connect() -> websockets.WebSocketClientProtocol:
 async def send_message_gpt(ws: websockets.WebSocketClientProtocol, user_text: str, persona: str) -> str:
     """
     Send user text to GPT 4-o mini Realtime, embedding KASPER persona in instructions.
-    Wait for 'response.complete' event; returns final text.
+    Wait for 'response.done' event; returns final text.
     Logs raw messages for debugging.
     """
     combined_prompt = (
@@ -168,15 +183,13 @@ async def send_message_gpt(ws: websockets.WebSocketClientProtocol, user_text: st
             ev_type = data.get("type", "")
             logger.debug(f"GPT event type: {ev_type}")
 
-            if ev_type == "response.complete":
-                final_text = data["response"]["payload"]["text"]
-                logger.info(f"Got final text: {final_text}")
-                break
-            elif ev_type == "response.intermediate":
-                # Handle intermediate responses if needed
-                pass
-            elif ev_type == "error":
-                logger.error(f"GPT error: {data}")
+            if ev_type == "response.done":
+                # Extract the final text
+                try:
+                    final_text = data["response"]["output"][0]["content"][0]["text"]
+                    logger.info(f"Got final text: {final_text}")
+                except (IndexError, KeyError) as e:
+                    logger.error(f"Error parsing GPT response: {e}")
                 break
 
     except websockets.exceptions.ConnectionClosed:
@@ -231,7 +244,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ws:
         USER_SESSIONS[user_id]["ws"] = ws
         await update.message.reply_text(
-            "👻 **KASPER is here!** 👻\n\nA fresh conversation has started (GPT 4-o mini). You have 15 daily messages. Let's chat! 💬"
+            "👻 **KASPER is here!** 👻\n\nA fresh conversation has started (GPT 4-o mini). You have 15 daily messages. Let's chat! 💬",
+            parse_mode="Markdown"
         )
     else:
         await update.message.reply_text("❌ Could not connect to GPT. Please try again later.")
@@ -276,7 +290,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         # Update Status Message
-        await update.message.reply_text("👻 **KASPER is recording a message...** 👻")
+        await update.message.reply_text("👻 **KASPER is recording a message...** 👻", parse_mode="Markdown")
 
         # Send message to GPT Realtime
         gpt_reply = await send_message_gpt(ws, user_text, session["persona"])
@@ -284,48 +298,37 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not gpt_reply:
             gpt_reply = "❓ Oops, KASPER couldn't come up with anything. (Ghostly shrug.) 🤷‍♂️"
 
+        logger.info(f"GPT Reply: {gpt_reply}")
+
         # ElevenLabs TTS
         mp3_data = await elevenlabs_tts(gpt_reply)
         if not mp3_data:
             await update.message.reply_text("❌ Sorry, I couldn't process your request.")
             return
+        logger.info("Received MP3 data from ElevenLabs TTS.")
 
+        # Convert MP3 to OGG
         ogg_file = convert_mp3_to_ogg(mp3_data)
+        ogg_buffer = ogg_file.getvalue()
+        if not ogg_buffer:
+            logger.error("Audio conversion failed: OGG buffer is empty.")
+            await update.message.reply_text("❌ Failed to convert audio. Please try again.")
+            return
+        logger.info("Successfully converted MP3 to OGG.")
 
         # Send voice message
-        ogg_buffer = ogg_file.getvalue()
-        if ogg_buffer:
-            ogg_bytes = BytesIO(ogg_buffer)
-            ogg_bytes.name = "voice.ogg"  # Telegram may require a filename
-            await update.message.reply_voice(voice=ogg_bytes)
-        else:
-            logger.info("No TTS audio or conversion failed.")
-            await update.message.reply_text("❌ Failed to convert audio. Please try again.")
+        ogg_bytes = BytesIO(ogg_buffer)
+        ogg_bytes.name = "voice.ogg"  # Telegram requires a filename
+        ogg_bytes.seek(0)  # Reset buffer position
+        await update.message.reply_voice(voice=ogg_bytes)
+        logger.info("Sent voice message to user.")
 
         # Inform the user about remaining messages
         if remaining > 0:
-            await update.message.reply_text(f"🕸️ You have **{remaining}** messages left today.")
+            await update.message.reply_text(f"🕸️ You have **{remaining}** messages left today.", parse_mode="Markdown")
         else:
             await update.message.reply_text("⛔ You have no messages left for today. Please try again tomorrow.")
 
     except Exception as e:
         logger.error(f"Error handling message from user {user_id}: {e}")
         await update.message.reply_text("❌ An error occurred while processing your message. Please try again later.")
-
-#######################################
-# Main Bot
-#######################################
-def main():
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-
-    logger.info("👻 KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit started. 👻")
-
-    # Run the bot
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
