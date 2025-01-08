@@ -6,6 +6,7 @@ import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict
 from io import BytesIO
+import signal
 
 import httpx
 import websockets
@@ -332,3 +333,37 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Error handling message from user {user_id}: {e}")
         await update.message.reply_text("❌ An error occurred while processing your message. Please try again later.")
+
+#######################################
+# Main Bot
+#######################################
+def main():
+    try:
+        check_ffmpeg()
+    except Exception as e:
+        logger.critical("ffmpeg is not available. Exiting.")
+        return
+
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+    logger.info("👻 KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit started. 👻")
+
+    # Register shutdown signals
+    loop = asyncio.get_event_loop()
+
+    for signame in ('SIGINT', 'SIGTERM'):
+        loop.add_signal_handler(getattr(signal, signame),
+                                lambda signame=signame: asyncio.create_task(application.stop()))
+
+    # Run the bot
+    try:
+        application.run_polling()
+    except Exception as e:
+        logger.error(f"Application encountered an error: {e}")
+
+if __name__ == "__main__":
+    main()
