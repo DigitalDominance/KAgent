@@ -115,7 +115,7 @@ async def elevenlabs_tts(text: str) -> bytes:
     }
     payload = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
+        "model_id": "eleven_turbo_v2",
     }
     async with httpx.AsyncClient() as client:
         try:
