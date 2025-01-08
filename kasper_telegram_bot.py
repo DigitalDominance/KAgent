@@ -36,7 +36,7 @@ ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
 #######################################
 # GPT 4-o Mini Realtime
 #######################################
-REALTIME_MODEL = "gpt-4o-mini"  # The short model name you said you'd use
+REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"  # The short model name you said you'd use
 
 #######################################
 # ElevenLabs TTS
