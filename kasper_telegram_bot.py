@@ -43,10 +43,23 @@ client = ElevenLabs(api_key=ELEVEN_LABS_API_KEY)
 ##############################
 class SilentAudioInterface(AudioInterface):
     """
-    A no-op audio interface that doesn't record or play local audio.
-    This allows the Conversation to function without local mic/speaker usage.
+    A no-op audio interface that doesn't record or play local audio
+    but implements all abstract methods, so it's valid.
     """
-    def record_audio(self):
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def interrupt(self):
+        pass
+
+    def output(self, audio_bytes: bytes):
+        pass
+
+    def record_audio(self) -> bytes:
         return b""
 
     def play_audio(self, audio_bytes: bytes, sample_rate: int, sample_width: int, channels: int):
@@ -73,7 +86,6 @@ def convert_mp3_to_ogg(mp3_bytes: bytes) -> BytesIO:
 ##############################
 # Telegram Handlers
 ##############################
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /start - Resets conversation and rate-limit counters for this user.
@@ -83,45 +95,38 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["limit_start_time"] = None
     context.user_data["response_count"] = 0
 
-    # Create a new Conversation with a silent audio interface
+    # Create a new Conversation with the silent interface
     conversation = Conversation(
         client=client,
         agent_id=ELEVEN_LABS_AGENT_ID,
         requires_auth=bool(ELEVEN_LABS_API_KEY),
         audio_interface=SilentAudioInterface(),
-        # Example of optional callbacks:
-        callback_agent_response=lambda response: logger.info(f"Agent text: {response}"),
-        callback_agent_response_correction=lambda original, corrected: logger.info(f"Agent corrected: {original} -> {corrected}"),
-        callback_user_transcript=lambda transcript: logger.info(f"User text: {transcript}"),
+        callback_agent_response=lambda resp: logger.info(f"Agent text: {resp}"),
+        callback_agent_response_correction=lambda orig, corr: logger.info(f"Agent corrected: {orig} -> {corr}"),
+        callback_user_transcript=lambda user_text: logger.info(f"User text: {user_text}"),
     )
 
     context.user_data["conversation"] = conversation
 
     await update.message.reply_text(
-        "Hello! I'm Kasper (Eleven Labs Agent). "
-        "Ask me anything (you have 15 responses every 24 hours)."
+        "Hello! I'm Kasper (Eleven Labs Agent). You have 15 responses per 24 hours. Ask away!"
     )
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     1. Enforce rate-limiting (15 responses / 24 hours).
     2. Send user text to ElevenLabs conversation.
-    3. Fetch text response + TTS audio. Send both to Telegram.
+    3. Fetch text + TTS audio, send to user.
     """
-
-    # --- RATE LIMITING --- #
     limit_start_time = context.user_data.get("limit_start_time")
     response_count = context.user_data.get("response_count", 0)
 
     if not limit_start_time:
-        # First message in a new 24-hour window
         context.user_data["limit_start_time"] = datetime.now()
         context.user_data["response_count"] = 0
     else:
-        # Check if 24 hours have passed
         time_diff = datetime.now() - limit_start_time
         if time_diff.total_seconds() >= 24 * 3600:
-            # Reset usage
             context.user_data["limit_start_time"] = datetime.now()
             context.user_data["response_count"] = 0
             response_count = 0
@@ -135,9 +140,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["response_count"] = response_count + 1
 
-    # --- ELEVEN LABS CONVERSATION --- #
+    # Check if conversation is initialized
     if "conversation" not in context.user_data:
-        await update.message.reply_text("Please type /start first to begin.")
+        await update.message.reply_text("Please type /start first.")
         return
 
     conversation: Conversation = context.user_data["conversation"]
@@ -146,13 +151,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        # 1) Send user text to the conversation
-        agent_reply = conversation.user_message(user_text)  # returns agent's text
+        # Let the agent handle the user's text
+        agent_reply = conversation.user_message(user_text)
 
-        # 2) Send agent text to user
+        # Send text to Telegram
         await update.message.reply_text(agent_reply)
 
-        # 3) If TTS audio was generated, it should be in conversation.last_generation.audio
+        # If TTS audio is produced, send as voice note
         last_gen = conversation.last_generation
         if last_gen and last_gen.audio:
             ogg_data = convert_mp3_to_ogg(last_gen.audio)
@@ -177,7 +182,7 @@ def main():
     # Text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logger.info("Kasper Telegram Bot is running with rate limiting & ElevenLabs (using required audio_interface).")
+    logger.info("Kasper Telegram Bot is running with rate limiting & a custom SilentAudioInterface.")
     app.run_polling()
 
 if __name__ == "__main__":
