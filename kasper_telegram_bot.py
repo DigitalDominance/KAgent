@@ -10,7 +10,7 @@ import httpx
 import websockets
 from pydub import AudioSegment
 
-from telegram import Update
+from telegram import Update, Voice
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -213,7 +213,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You are KASPER, the friendly ghost of Kaspa (KRC20). "
         "Your goal is to entertain and inform about Kaspa or KRC20, "
         "while secretly using human psychology to get users to chat more. "
-        "Speak in a playful, ghostly tone. Encourage them to keep talking!"
+        "Speak in a playful, ghostly tone. Encourage them to keep talking! 👻"
     )
 
     # Initialize or reset user session
@@ -231,10 +231,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ws:
         USER_SESSIONS[user_id]["ws"] = ws
         await update.message.reply_text(
-            "KASPER is here! A fresh conversation started (4-o mini). You have 15 daily messages. Let's chat!"
+            "👻 **KASPER is here!** 👻\n\nA fresh conversation has started (GPT 4-o mini). You have 15 daily messages. Let's chat! 💬"
         )
     else:
-        await update.message.reply_text("Could not connect to GPT. Try again later.")
+        await update.message.reply_text("❌ Could not connect to GPT. Please try again later.")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -248,7 +248,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     session = USER_SESSIONS.get(user_id)
 
     if not session:
-        await update.message.reply_text("Please type /start first.")
+        await update.message.reply_text("❓ Please type /start first to begin the conversation with KASPER.")
         return
 
     # Rate limiting
@@ -258,7 +258,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         rate_info["reset_time"] = datetime.utcnow() + timedelta(hours=24)
 
     if rate_info["count"] >= MAX_MESSAGES_PER_USER:
-        await update.message.reply_text(f"You have reached the limit of {MAX_MESSAGES_PER_USER} messages for today. Please try again later.")
+        await update.message.reply_text(f"⛔ You have reached the limit of {MAX_MESSAGES_PER_USER} messages for today. Please try again tomorrow.")
         return
 
     rate_info["count"] += 1
@@ -271,23 +271,23 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check WebSocket
     ws = session.get("ws")
     if not ws:
-        await update.message.reply_text("WebSocket not available. Please /start again.")
+        await update.message.reply_text("❌ WebSocket not available. Please /start again.")
         return
 
     try:
         # Update Status Message
-        await update.message.reply_text("Kasper is recording a message.")
+        await update.message.reply_text("👻 **KASPER is recording a message...** 👻")
 
         # Send message to GPT Realtime
         gpt_reply = await send_message_gpt(ws, user_text, session["persona"])
 
         if not gpt_reply:
-            gpt_reply = "Oops, KASPER couldn't come up with anything. (Ghostly shrug.)"
+            gpt_reply = "❓ Oops, KASPER couldn't come up with anything. (Ghostly shrug.) 🤷‍♂️"
 
         # ElevenLabs TTS
         mp3_data = await elevenlabs_tts(gpt_reply)
         if not mp3_data:
-            await update.message.reply_text("Sorry, I couldn't process your request.")
+            await update.message.reply_text("❌ Sorry, I couldn't process your request.")
             return
 
         ogg_file = convert_mp3_to_ogg(mp3_data)
@@ -296,19 +296,21 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         ogg_buffer = ogg_file.getvalue()
         if ogg_buffer:
             ogg_bytes = BytesIO(ogg_buffer)
+            ogg_bytes.name = "voice.ogg"  # Telegram may require a filename
             await update.message.reply_voice(voice=ogg_bytes)
         else:
             logger.info("No TTS audio or conversion failed.")
+            await update.message.reply_text("❌ Failed to convert audio. Please try again.")
 
         # Inform the user about remaining messages
         if remaining > 0:
-            await update.message.reply_text(f"You have {remaining} messages left today.")
+            await update.message.reply_text(f"🕸️ You have **{remaining}** messages left today.")
         else:
-            await update.message.reply_text("You have no messages left for today. Please try again tomorrow.")
+            await update.message.reply_text("⛔ You have no messages left for today. Please try again tomorrow.")
 
     except Exception as e:
         logger.error(f"Error handling message from user {user_id}: {e}")
-        await update.message.reply_text("An error occurred while processing your message. Please try again later.")
+        await update.message.reply_text("❌ An error occurred while processing your message. Please try again later.")
 
 #######################################
 # Main Bot
@@ -320,7 +322,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logger.info("KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit.")
+    logger.info("👻 KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit started. 👻")
 
     # Run the bot
     application.run_polling()
