@@ -1,7 +1,7 @@
 import logging
 import os
 from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from pydub import AudioSegment
 from telegram import Update
@@ -13,9 +13,9 @@ from telegram.ext import (
     filters
 )
 
-# ElevenLabs imports (Python SDK)
+# ElevenLabs Python SDK
 from elevenlabs import ElevenLabs
-from elevenlabs.conversational_ai.conversation import Conversation, AgentResponse
+from elevenlabs.conversational_ai.conversation import Conversation
 
 ##############################
 # Logging
@@ -34,19 +34,15 @@ ELEVEN_LABS_API_KEY = os.environ.get("ELEVEN_LABS_API_KEY", "")
 ELEVEN_LABS_AGENT_ID = os.environ.get("ELEVEN_LABS_AGENT_ID", "")
 
 ##############################
-# Eleven Labs: Python SDK
+# Eleven Labs Client
 ##############################
-
-# Create a single client for all conversations
 client = ElevenLabs(api_key=ELEVEN_LABS_API_KEY)
 
 ##############################
-# Utility: Convert MP3 to OGG
+# Audio Conversion
 ##############################
 def convert_mp3_to_ogg(mp3_bytes: bytes) -> BytesIO:
-    """
-    Converts MP3 bytes to OGG/Opus for Telegram voice notes.
-    """
+    """Convert MP3 bytes to OGG/Opus for Telegram voice notes."""
     try:
         mp3_file = BytesIO(mp3_bytes)
         segment = AudioSegment.from_file(mp3_file, format="mp3")
@@ -64,55 +60,53 @@ def convert_mp3_to_ogg(mp3_bytes: bytes) -> BytesIO:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /start - Resets conversation_id and rate-limit counters for this user.
-    Also creates a new ElevenLabs Conversation object.
+    /start - Resets conversation and rate-limit counters for this user.
+    Creates a new ElevenLabs Conversation object.
     """
-    # Clear rate limit data
+    # Reset rate limit
     context.user_data["limit_start_time"] = None
     context.user_data["response_count"] = 0
 
-    # Create a new Conversation instance from the ElevenLabs SDK
+    # Create new Conversation
     conversation = Conversation(
         client=client,
         agent_id=ELEVEN_LABS_AGENT_ID,
         requires_auth=bool(ELEVEN_LABS_API_KEY),
-        # We won't use DefaultAudioInterface because
-        # we're in Telegram, not local mic/speaker usage
     )
-    # (Optionally) start_session if you want to force a new session:
-    # conversation.start_session()
+    # Optionally, conversation.start_session() if you want to explicitly begin.
 
+    # Save it in user_data
     context.user_data["conversation"] = conversation
 
     await update.message.reply_text(
-        "Hello! I'm Kasper. The Friendly Ghost of KRC20!"
+        "Hello! I'm Kasper (Eleven Labs Agent). How can I help you today?"
     )
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     1. Enforce rate-limiting (15 responses / 24 hours).
-    2. If we have an ElevenLabs Conversation, send user text to it.
-    3. Get the agent's text + optional TTS audio, and send both to the user.
+    2. Send user text to ElevenLabs conversation.
+    3. Parse text + optional audio response, send to user.
     """
 
-    # --- RATE LIMITING LOGIC --- #
+    # --- RATE LIMITING --- #
     limit_start_time = context.user_data.get("limit_start_time")
     response_count = context.user_data.get("response_count", 0)
 
-    # If no limit_start_time, this is the user's FIRST message in a 24-hour window.
+    # If no start time, set it now
     if not limit_start_time:
         context.user_data["limit_start_time"] = datetime.now()
         context.user_data["response_count"] = 0
     else:
-        # Check if 24 hours have passed since limit_start_time.
+        # Check if 24 hours have passed
         time_diff = datetime.now() - limit_start_time
         if time_diff.total_seconds() >= 24 * 3600:
-            # Reset the window.
+            # Reset window
             context.user_data["limit_start_time"] = datetime.now()
             context.user_data["response_count"] = 0
-            response_count = 0  # We just reset it.
+            response_count = 0
 
-    # Now check if user has hit the 15-response limit.
+    # If user hit 15-limit
     if response_count >= 15:
         await update.message.reply_text(
             "You have used all 15 responses for the day. "
@@ -120,12 +114,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # If below limit, increment response_count
+    # Increment usage
     context.user_data["response_count"] = response_count + 1
 
-    # --- ELEVEN LABS CONVERSATION LOGIC --- #
+    # --- ELEVEN LABS CONVERSATION --- #
     if "conversation" not in context.user_data:
-        await update.message.reply_text("Please type /start to begin your session.")
+        await update.message.reply_text("Please type /start first.")
         return
 
     conversation: Conversation = context.user_data["conversation"]
@@ -135,24 +129,21 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        # Send the user's message to the conversation
-        # This should return the agent's text reply and (optionally) audio data
+        # Send user text, get agent reply
         agent_reply: str = conversation.user_message(user_text)
 
-        # Send agent text to Telegram
+        # Send text response to Telegram
         await update.message.reply_text(agent_reply)
 
-        # If the conversation generated audio for this message, we can retrieve it:
-        # 'last_generation' is an AgentResponse that might contain .audio bytes
-        last_gen: AgentResponse = conversation.last_generation
+        # Check for audio in last_generation
+        last_gen = conversation.last_generation
         if last_gen and last_gen.audio:
-            # Convert MP3 -> OGG
             ogg_data = convert_mp3_to_ogg(last_gen.audio)
             if ogg_data.getbuffer().nbytes > 0:
                 await update.message.reply_voice(voice=ogg_data)
 
     except Exception as e:
-        logger.error(f"Error handling conversation: {e}")
+        logger.error(f"Error in conversation: {e}")
         await update.message.reply_text("Sorry, I'm having trouble connecting to the Agent.")
 
 ##############################
@@ -169,7 +160,7 @@ def main():
     # Text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logging.info("Kasper Telegram Bot is running with rate limiting & Eleven Labs (Python SDK).")
+    logger.info("Kasper Telegram Bot is running with rate limiting & ElevenLabs Python SDK.")
     app.run_polling()
 
 if __name__ == "__main__":
