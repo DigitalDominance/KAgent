@@ -1,14 +1,15 @@
 import os
 import json
 import logging
-import requests
+import asyncio
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 
-import websocket  # from websocket-client
+import httpx
+import websockets
 from pydub import AudioSegment
 
-from telegram import Update
+from telegram import Update, Voice
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -32,30 +33,22 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
+ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "X6Hd6garE7rwoQExOLCe")  # Example Kasper voice ID
+MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "15"))
 
 #######################################
 # GPT 4-o Mini Realtime
 #######################################
 REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"  # The short model name you said you'd use
+GPT_REALTIME_WS_URL = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 
 #######################################
-# ElevenLabs TTS
-#######################################
-ELEVEN_LABS_VOICE_ID = "X6Hd6garE7rwoQExOLCe"  # Example KASPER voice ID
-
-#######################################
-# Rate Limit: 15 messages / 24h
-#######################################
-MAX_MESSAGES = 15
-
-#######################################
-# In-memory Session Store
+# Rate Limiting
 #######################################
 # user_id -> {
-#   "ws": websocket.WebSocket or None,
 #   "rate_start": datetime,
 #   "message_count": int,
-#   "persona": str (the KASPER persona text),
+#   "persona": str,
 # }
 USER_SESSIONS = {}
 
@@ -65,7 +58,6 @@ USER_SESSIONS = {}
 def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
     """
     Convert MP3 bytes to OGG (Opus) for Telegram voice notes.
-    Includes parameters=["-strict","-2"] to allow experimental opus encoder.
     """
     try:
         mp3_file = BytesIO(mp3_data)
@@ -74,8 +66,7 @@ def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
         segment.export(
             ogg_buffer,
             format="ogg",
-            codec="opus",
-            parameters=["-strict","-2"]  # or use libopus instead
+            codec="opus"
         )
         ogg_buffer.seek(0)
         return ogg_buffer
@@ -84,11 +75,11 @@ def convert_mp3_to_ogg(mp3_data: bytes) -> BytesIO:
         return BytesIO()
 
 #######################################
-# ElevenLabs TTS
+# ElevenLabs TTS (Asynchronous)
 #######################################
-def elevenlabs_tts(text: str) -> bytes:
+async def elevenlabs_tts(text: str) -> bytes:
     """
-    Calls ElevenLabs TTS endpoint, returning MP3 audio bytes.
+    Calls ElevenLabs TTS endpoint asynchronously, returning MP3 audio bytes.
     """
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_LABS_VOICE_ID}"
     headers = {
@@ -100,9 +91,10 @@ def elevenlabs_tts(text: str) -> bytes:
         "model_id": "eleven_monolingual_v1",
     }
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        return resp.content  # raw MP3
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            return resp.content  # raw MP3
     except Exception as e:
         logger.error(f"Error calling ElevenLabs TTS: {e}")
         return b""
@@ -110,22 +102,23 @@ def elevenlabs_tts(text: str) -> bytes:
 #######################################
 # GPT 4-o Mini (Realtime) WebSocket
 #######################################
-def openai_realtime_connect() -> websocket.WebSocket:
+async def openai_realtime_connect() -> websockets.WebSocketClientProtocol:
     """
-    Opens a blocking WebSocket connection to OpenAI Realtime API (gpt-4o-mini).
+    Opens an asynchronous WebSocket connection to OpenAI Realtime API (gpt-4o-mini).
     """
-    url = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
-    headers = [
-        "Authorization: Bearer " + OPENAI_API_KEY,
-        "OpenAI-Beta: realtime=v1"
-    ]
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1"
+    }
+    try:
+        ws = await websockets.connect(GPT_REALTIME_WS_URL, extra_headers=headers)
+        logger.info("Connected to GPT Realtime (4-o mini).")
+        return ws
+    except Exception as e:
+        logger.error(f"Failed to connect to GPT Realtime: {e}")
+        return None
 
-    ws = websocket.WebSocket()
-    ws.connect(url, header=headers)
-    logger.info("Connected to GPT Realtime (4-o mini).")
-    return ws
-
-def send_message_gpt(ws: websocket.WebSocket, user_text: str, persona: str) -> str:
+async def send_message_gpt(ws: websockets.WebSocketClientProtocol, user_text: str, persona: str) -> str:
     """
     Send user text to GPT 4-o mini Realtime, embedding KASPER persona in instructions.
     Wait for 'response.complete' event; returns final text.
@@ -144,62 +137,56 @@ def send_message_gpt(ws: websocket.WebSocket, user_text: str, persona: str) -> s
             "instructions": combined_prompt
         }
     }
-    ws.send(json.dumps(event))
+    await ws.send(json.dumps(event))
+    logger.debug(f"Sent to GPT: {json.dumps(event)}")
 
     final_text = ""
-    while True:
-        msg = ws.recv()
-        if not msg:
-            logger.info("WS recv() returned empty. Breaking.")
-            break
+    try:
+        async for message in ws:
+            if not message:
+                logger.info("WS recv() returned empty. Breaking.")
+                break
 
-        logger.info(f"Raw WS message: {msg}")  # <--- extra debug
+            logger.info(f"Raw WS message: {message}")  # <--- extra debug
 
-        try:
-            data = json.loads(msg)
-        except Exception:
-            logger.info(f"Non-JSON WS message: {msg}")
-            continue
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                logger.info(f"Non-JSON WS message: {message}")
+                continue
 
-        ev_type = data.get("type", "")
-        logger.debug(f"GPT event type: {ev_type}")
+            ev_type = data.get("type", "")
+            logger.debug(f"GPT event type: {ev_type}")
 
-        if ev_type == "response.complete":
-            final_text = data["response"]["payload"]["text"]
-            logger.info(f"Got final text: {final_text}")
-            break
-        elif ev_type == "response.intermediate":
-            # partial text
-            pass
-        elif ev_type == "error":
-            logger.error(f"GPT error: {data}")
-            break
+            if ev_type == "response.complete":
+                final_text = data["response"]["payload"]["text"]
+                logger.info(f"Got final text: {final_text}")
+                break
+            elif ev_type == "response.intermediate":
+                # Handle partial text if needed
+                pass
+            elif ev_type == "error":
+                logger.error(f"GPT error: {data}")
+                break
+
+    except websockets.ConnectionClosed:
+        logger.error("WebSocket connection closed unexpectedly.")
 
     return final_text
 
 #######################################
 # Telegram Handlers
 #######################################
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /start: 
-    - Close old WS if exists
+    /start:
     - Reset daily usage
     - Open new GPT Realtime WS (4-o mini)
     - Create KASPER persona
     """
     user_id = update.effective_user.id
 
-    # Close old session if any
-    old_session = USER_SESSIONS.get(user_id)
-    if old_session and old_session.get("ws"):
-        try:
-            old_session["ws"].close()
-        except:
-            pass
-
+    # Reset or create session
     kasper_persona = (
         "You are KASPER, the friendly ghost of Kaspa (KRC20). "
         "Your goal is to entertain and inform about Kaspa or KRC20, "
@@ -207,20 +194,28 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Speak in a playful, ghostly tone. Encourage them to keep talking!"
     )
 
+    # Close old WebSocket if exists
+    old_session = USER_SESSIONS.get(user_id)
+    if old_session and old_session.get("ws"):
+        try:
+            await old_session["ws"].close()
+            logger.info(f"Closed old WebSocket for user {user_id}.")
+        except Exception as e:
+            logger.error(f"Error closing old WebSocket for user {user_id}: {e}")
+
+    # Establish new WebSocket connection
+    ws = await openai_realtime_connect()
+    if not ws:
+        await update.message.reply_text("Could not connect to GPT. Please try again later.")
+        return
+
+    # Initialize session
     USER_SESSIONS[user_id] = {
-        "ws": None,
-        "rate_start": datetime.now(),
+        "ws": ws,
+        "rate_start": datetime.utcnow(),
         "message_count": 0,
         "persona": kasper_persona
     }
-
-    try:
-        ws = openai_realtime_connect()
-        USER_SESSIONS[user_id]["ws"] = ws
-    except Exception as e:
-        logger.error(f"Failed to connect GPT Realtime: {e}")
-        await update.message.reply_text("Could not connect to GPT. Try again later.")
-        return
 
     await update.message.reply_text(
         "KASPER is here! A fresh conversation started (4-o mini). You have 15 daily messages. Let's chat!"
@@ -232,75 +227,126 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     2. Send user text -> GPT 4-o mini Realtime with KASPER persona
     3. TTS with ElevenLabs
     4. Convert & send audio
+    5. Inform user of remaining messages
     """
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     session = USER_SESSIONS.get(user_id)
+
     if not session:
-        await update.message.reply_text("Please type /start first.")
+        await update.message.reply_text("Please type /start first to begin a conversation.")
         return
 
     # Rate limiting
     rate_start = session["rate_start"]
     msg_count = session["message_count"]
-    elapsed = (datetime.now() - rate_start).total_seconds()
+    now = datetime.utcnow()
 
-    if elapsed >= 24 * 3600:
-        session["rate_start"] = datetime.now()
+    if now - rate_start >= timedelta(hours=24):
+        session["rate_start"] = now
         session["message_count"] = 0
         msg_count = 0
 
-    if msg_count >= MAX_MESSAGES:
-        await update.message.reply_text(f"You reached {MAX_MESSAGES} daily messages. Wait 24h to continue.")
+    if msg_count >= MAX_MESSAGES_PER_USER:
+        await update.message.reply_text(
+            f"You have reached your daily limit of {MAX_MESSAGES_PER_USER} messages. Please try again tomorrow."
+        )
         return
 
-    session["message_count"] = msg_count + 1
+    # Increment message count
+    session["message_count"] += 1
+    remaining = MAX_MESSAGES_PER_USER - session["message_count"]
 
     user_text = update.message.text.strip()
     if not user_text:
+        await update.message.reply_text("Please send a non-empty message.")
         return
 
-    # Check WS
+    # Inform user that KASPER is recording a message
+    await update.message.reply_text("KASPER is recording a message...")
+
+    # Send message to GPT Realtime
     ws = session["ws"]
-    if not ws:
-        await update.message.reply_text("WebSocket not available. Please /start again.")
-        return
-
-    await update.message.reply_text("KASPER is thinking...")
-
     persona = session["persona"]
-    gpt_reply = ""
-    try:
-        gpt_reply = send_message_gpt(ws, user_text, persona)
-    except Exception as e:
-        logger.error(f"Error sending GPT message: {e}")
-        await update.message.reply_text("GPT error. Try again later.")
-        return
+    gpt_reply = await send_message_gpt(ws, user_text, persona)
 
     if not gpt_reply:
         gpt_reply = "Oops, KASPER couldn't come up with anything. (Ghostly shrug.)"
 
     # ElevenLabs TTS
-    mp3_data = elevenlabs_tts(gpt_reply)
-    ogg_file = convert_mp3_to_ogg(mp3_data)
+    mp3_data = await elevenlabs_tts(gpt_reply)
+    if not mp3_data:
+        await update.message.reply_text("Sorry, I couldn't process your request at the moment.")
+        return
 
-    # Send text + voice note
-    await update.message.reply_text(gpt_reply)
-    if ogg_file.getbuffer().nbytes > 0:
+    # Convert MP3 to OGG
+    loop = asyncio.get_running_loop()
+    ogg_file = await loop.run_in_executor(None, convert_mp3_to_ogg, mp3_data)
+
+    # Send voice note
+    try:
         await update.message.reply_voice(voice=ogg_file)
+    except Exception as e:
+        logger.error(f"Error sending voice message: {e}")
+        await update.message.reply_text("Failed to send voice message.")
+
+    # Inform user about remaining messages
+    if remaining > 0:
+        await update.message.reply_text(f"You have {remaining} messages left today.")
     else:
-        logger.info("No TTS audio or conversion failed.")
+        await update.message.reply_text("You have no messages left today. Please try again tomorrow.")
+
+#######################################
+# Graceful Shutdown Handling
+#######################################
+async def shutdown(app):
+    """
+    Gracefully shuts down the bot by closing all WebSocket connections.
+    """
+    logger.info("Shutting down bot gracefully...")
+    # Close all WebSocket connections
+    for user_id, session in USER_SESSIONS.items():
+        ws = session.get("ws")
+        if ws:
+            try:
+                await ws.close()
+                logger.info(f"Closed WebSocket for user {user_id}.")
+            except Exception as e:
+                logger.error(f"Error closing WebSocket for user {user_id}: {e}")
+
+    await app.stop()
+    await app.shutdown()
+    logger.info("Bot shut down successfully.")
 
 #######################################
 # Main Bot
 #######################################
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+async def main():
+    # Build the Telegram application
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logger.info("KASPER Telegram Bot: GPT 4-o mini Realtime + ElevenLabs TTS + 15/day limit.")
-    app.run_polling()
+    # Register shutdown signals
+    loop = asyncio.get_running_loop()
+    for signame in {'SIGINT', 'SIGTERM'}:
+        loop.add_signal_handler(
+            getattr(signal, signame),
+            lambda signame=signame: asyncio.create_task(shutdown(application))
+        )
+
+    # Start the bot
+    logger.info("Starting KASPER Telegram Bot...")
+    await application.start()
+    await application.updater.start_polling()
+
+    # Run until shutdown
+    await application.updater.idle()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped manually.")
