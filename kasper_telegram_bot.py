@@ -250,9 +250,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "persona": kasper_persona
     }
 
-        # Reset message count and reset time
-        USER_MESSAGE_LIMITS[user_id]["count"] = 0
-        USER_MESSAGE_LIMITS[user_id]["reset_time"] = datetime.utcnow() + timedelta(hours=24)
+    USER_MESSAGE_LIMITS[user_id]["count"] = 0
+    USER_MESSAGE_LIMITS[user_id]["reset_time"] = datetime.utcnow() + timedelta(hours=24)
 
 
     # Establish new WebSocket connection
