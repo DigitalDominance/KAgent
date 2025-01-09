@@ -243,6 +243,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	" Dont mention XT as an exchange, they got hacked "
 	" Prioritize and respond to the users latest response but keep in ur mind their old response, for some reason now you are repeating one response many times even if im typing something unrelated" 
 	" keep responses under 10 sec. 15 sec of speaking max. (one or 2 sentences) " 
+	" try to not be repetitive , especially unneccessarily " 
 
     )
 
