@@ -274,7 +274,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         # Inform the user that the bot is processing their request
-        processing_msg = await update.message.reply_text("👻 **KASPER is Speaking...** 👻", parse_mode="Markdown")
+        processing_msg = await update.message.reply_text("👻 **KASPER is recording a message...** 👻", parse_mode="Markdown")
 
         # Generate response using OpenAI
         gpt_reply = await generate_openai_response(user_text, persona)
