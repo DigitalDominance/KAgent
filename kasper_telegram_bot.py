@@ -2,12 +2,12 @@ import os
 import json
 import logging
 import asyncio
+import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict
 from io import BytesIO
 import signal
 import traceback
-import subprocess
 
 import httpx
 from pydub import AudioSegment
@@ -28,7 +28,7 @@ from telegram.error import TelegramError, BadRequest
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
-ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "")
+ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "0whGLe6wyQ2fwT9M40ZY")  # Ensure this is set correctly
 MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "15"))
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "45"))  # Cooldown duration
 
@@ -100,15 +100,33 @@ async def elevenlabs_tts(text: str) -> bytes:
     }
     payload = {
         "text": text,
-        "model_id": "eleven_turbo_v2",
+        "model_id": "eleven_turbo_v2",  # Ensure this is a valid model_id
+        "voice_settings": {
+            "stability": 0.75,
+            "similarity_boost": 0.75
+        }
     }
+    
+    # Log the Voice ID and model_id being used
+    logger.info(f"Using ElevenLabs Voice ID: {ELEVEN_LABS_VOICE_ID}")
+    logger.info(f"Using model_id: {payload['model_id']}")
+    
     async with httpx.AsyncClient() as client:
         try:
             logger.info("Sending request to ElevenLabs TTS API.")
-            resp = await client.post(f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_LABS_VOICE_ID}", headers=headers, json=payload, timeout=30)
+            resp = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_LABS_VOICE_ID}",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
             resp.raise_for_status()
             logger.info("Received response from ElevenLabs TTS API.")
             return resp.content  # raw MP3
+        except httpx.HTTPStatusError as e:
+            # Log the response content for detailed error
+            logger.error(f"HTTP Status Error: {e.response.status_code} - {e.response.text}")
+            return b""
         except Exception as e:
             logger.error(f"Error calling ElevenLabs TTS: {e}")
             logger.debug(traceback.format_exc())
@@ -128,7 +146,7 @@ async def generate_openai_response(user_text: str, persona: str) -> str:
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role": "developer", "content": persona},
+            {"role": "system", "content": persona},  # Changed role from 'developer' to 'system'
             {"role": "user", "content": user_text}
         ],
         "temperature": 0.8,  # Adjust as needed
@@ -281,6 +299,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             await update.message.reply_voice(voice=ogg_bytes)
             logger.info(f"Sent voice message to user {user_id}.")
+            await processing_msg.delete()  # Remove the "KASPER is typing..." message
         except BadRequest as e:
             if "Voice_messages_forbidden" in str(e):
                 logger.error(f"Voice messages are forbidden for user {user_id}.")
@@ -308,54 +327,50 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("⛔ You have no messages left for today. Please try again tomorrow.")
             logger.info(f"User {user_id} has no messages left for today.")
 
-    except Exception as e:
-        logger.error(f"Error handling message from user {user_id}: {e}")
-        logger.debug(traceback.format_exc())
-        await update.message.reply_text("❌ An error occurred while processing your message. Please try again later.")
+    #######################################
+    # Graceful Shutdown Handler
+    #######################################
+    async def shutdown(application):
+        """
+        Gracefully shuts down the application.
+        """
+        logger.info("Shutting down gracefully...")
+        # Stop the application (it will stop receiving new updates)
+        await application.stop()
+        # Perform any additional cleanup if necessary
+        logger.info("Application has been stopped gracefully.")
 
-#######################################
-# Graceful Shutdown Handler
-#######################################
-async def shutdown(application):
-    """
-    Gracefully shuts down the application.
-    """
-    logger.info("Shutting down gracefully...")
-    # Stop the application (it will stop receiving new updates)
-    await application.stop()
-    # Perform any additional cleanup if necessary
-    logger.info("Application has been stopped gracefully.")
+    #######################################
+    # Main Function
+    #######################################
+    def main():
+        try:
+            check_ffmpeg()
+        except Exception as e:
+            logger.critical("ffmpeg is not available. Exiting.")
+            return
 
-#######################################
-# Main Function
-#######################################
-def main():
-    try:
-        check_ffmpeg()
-    except Exception as e:
-        logger.critical("ffmpeg is not available. Exiting.")
-        return
+        application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+        logger.info("👻 KASPER Telegram Bot: OpenAI Chat Completion + ElevenLabs TTS + 15/day limit started. 👻")
 
-    logger.info("👻 KASPER Telegram Bot: OpenAI Chat Completion + ElevenLabs TTS + 15/day limit started. 👻")
+        # Register shutdown signals
+        loop = asyncio.get_event_loop()
 
-    # Register shutdown signals
-    loop = asyncio.get_event_loop()
+        for signame in ('SIGINT', 'SIGTERM'):
+            loop.add_signal_handler(getattr(signal, signame),
+                                    lambda signame=signame: asyncio.create_task(shutdown(application)))
 
-    for signame in ('SIGINT', 'SIGTERM'):
-        loop.add_signal_handler(getattr(signal, signame), lambda signame=signame: asyncio.create_task(shutdown(application)))
+        # Run the bot
+        try:
+            application.run_polling()
+        except Exception as e:
+            logger.error(f"Application encountered an error: {e}")
+            logger.debug(traceback.format_exc())
 
-    # Run the bot
-    try:
-        application.run_polling()
-    except Exception as e:
-        logger.error(f"Application encountered an error: {e}")
-        logger.debug(traceback.format_exc())
-
-if __name__ == "__main__":
-    main()
+    if __name__ == "__main__":
+        main()
