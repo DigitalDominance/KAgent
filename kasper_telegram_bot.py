@@ -171,8 +171,8 @@ async def send_message_gpt(ws: websockets.WebSocketClientProtocol, user_text: st
         "type": "response.create",
         "response": {
             "modalities": ["text"],
-            "instructions": combined_prompt,
-            "max_response_output_tokens": 1024  # Set to a reasonable integer
+            "instructions": combined_prompt
+            # Removed "max_response_output_tokens" as it's an unknown parameter
         }
     }
     try:
