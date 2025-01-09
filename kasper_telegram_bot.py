@@ -327,50 +327,55 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("⛔ You have no messages left for today. Please try again tomorrow.")
             logger.info(f"User {user_id} has no messages left for today.")
 
-    #######################################
-    # Graceful Shutdown Handler
-    #######################################
-    async def shutdown(application):
-        """
-        Gracefully shuts down the application.
-        """
-        logger.info("Shutting down gracefully...")
-        # Stop the application (it will stop receiving new updates)
-        await application.stop()
-        # Perform any additional cleanup if necessary
-        logger.info("Application has been stopped gracefully.")
+    except Exception as e:
+        logger.error(f"An error occurred in handle_text_message for user {user_id}: {e}")
+        logger.debug(traceback.format_exc())
+        await update.message.reply_text("❌ An unexpected error occurred. Please try again later.")
 
-    #######################################
-    # Main Function
-    #######################################
-    def main():
-        try:
-            check_ffmpeg()
-        except Exception as e:
-            logger.critical("ffmpeg is not available. Exiting.")
-            return
+#######################################
+# Graceful Shutdown Handler
+#######################################
+async def shutdown(application):
+    """
+    Gracefully shuts down the application.
+    """
+    logger.info("Shutting down gracefully...")
+    # Stop the application (it will stop receiving new updates)
+    await application.stop()
+    # Perform any additional cleanup if necessary
+    logger.info("Application has been stopped gracefully.")
 
-        application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+#######################################
+# Main Function
+#######################################
+def main():
+    try:
+        check_ffmpeg()
+    except Exception as e:
+        logger.critical("ffmpeg is not available. Exiting.")
+        return
 
-        # Add handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-        logger.info("👻 KASPER Telegram Bot: OpenAI Chat Completion + ElevenLabs TTS + 15/day limit started. 👻")
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-        # Register shutdown signals
-        loop = asyncio.get_event_loop()
+    logger.info("👻 KASPER Telegram Bot: OpenAI Chat Completion + ElevenLabs TTS + 15/day limit started. 👻")
 
-        for signame in ('SIGINT', 'SIGTERM'):
-            loop.add_signal_handler(getattr(signal, signame),
-                                    lambda signame=signame: asyncio.create_task(shutdown(application)))
+    # Register shutdown signals
+    loop = asyncio.get_event_loop()
 
-        # Run the bot
-        try:
-            application.run_polling()
-        except Exception as e:
-            logger.error(f"Application encountered an error: {e}")
-            logger.debug(traceback.format_exc())
+    for signame in ('SIGINT', 'SIGTERM'):
+        loop.add_signal_handler(getattr(signal, signame),
+                                lambda signame=signame: asyncio.create_task(shutdown(application)))
 
-    if __name__ == "__main__":
-        main()
+    # Run the bot
+    try:
+        application.run_polling()
+    except Exception as e:
+        logger.error(f"Application encountered an error: {e}")
+        logger.debug(traceback.format_exc())
+
+if __name__ == "__main__":
+    main()
