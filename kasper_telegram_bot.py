@@ -43,7 +43,7 @@ MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "15"))
 #######################################
 # GPT 4-o Mini Realtime
 #######################################
-REALTIME_MODEL = "gpt-4o-realtime-preview-2024-12-17"  # Replace with your actual model name
+REALTIME_MODEL = "gpt-4o-mini"  # Replace with your actual model name
 GPT_WS_URL = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 
 #######################################
