@@ -28,7 +28,7 @@ from telegram.error import TelegramError, BadRequest
 #######################################
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO  # Set to DEBUG for more detailed logs
 )
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "45"))  # Cooldown duration
 #######################################
 # GPT 4-o Mini Realtime
 #######################################
-REALTIME_MODEL = "gpt-4o-mini"  # Updated model name
+REALTIME_MODEL = "gpt-4o-mini"  # Updated model name without any suffix
 GPT_WS_URL = f"wss://api.openai.com/v1/realtime?model={REALTIME_MODEL}"
 
 #######################################
@@ -408,6 +408,28 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ An error occurred while processing your message. Please try again later.")
 
 #######################################
+# Graceful Shutdown Handler
+#######################################
+async def shutdown(application):
+    """
+    Gracefully shuts down the application by closing all WebSocket connections.
+    """
+    logger.info("Shutting down gracefully...")
+    # Close all WebSocket connections
+    for user_id, session in USER_SESSIONS.items():
+        ws = session.get("ws")
+        if ws:
+            try:
+                await ws.close()
+                logger.info(f"Closed WebSocket for user {user_id}.")
+            except Exception as e:
+                logger.error(f"Error closing WebSocket for user {user_id}: {e}")
+                logger.debug(traceback.format_exc())
+
+    await application.stop()
+    logger.info("Application has been stopped gracefully.")
+
+#######################################
 # Main Bot
 #######################################
 def main():
@@ -429,8 +451,7 @@ def main():
     loop = asyncio.get_event_loop()
 
     for signame in ('SIGINT', 'SIGTERM'):
-        loop.add_signal_handler(getattr(signal, signame),
-                                lambda signame=signame: asyncio.create_task(application.stop()))
+        loop.add_signal_handler(getattr(signal, signame), lambda signame=signame: asyncio.create_task(shutdown(application)))
 
     # Run the bot
     try:
