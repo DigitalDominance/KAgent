@@ -28,7 +28,7 @@ from telegram.error import TelegramError, BadRequest
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
-ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "0whGLe6wyQ2fwT9M40ZY")  # Ensure this is set correctly
+ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "0whGLe6wyQ2fwT9M40ZY")  # Correct Voice ID
 MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "15"))
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "45"))  # Cooldown duration
 
