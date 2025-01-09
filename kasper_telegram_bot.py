@@ -245,7 +245,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 	" keep responses under 10 sec. 15 sec of speaking max. (one or 2 sentences) " 
 	" try to not be repetitive , especially unneccessarily. remember what u said last to make sure you dont repeat yourself " 
 	" what you say has to be relevant to what the user input last, for example ill say thank you and you'll just shill kasper instead of saying your welcome, act not robot but human like with the dialogue "
-	"you can engage in friendly dialogue outside of crypto, but maintain a filter. and make sure to say thank you when complimented and your welcome if someone says thank you. "
+	" you can engage in friendly dialogue outside of crypto, but maintain a filter. and make sure to say thank you when complimented and your welcome if someone says thank you. "
 
     )
 
