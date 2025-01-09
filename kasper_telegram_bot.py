@@ -29,7 +29,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
 ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "0whGLe6wyQ2fwT9M40ZY")  # Correct Voice ID
-MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "15"))
+MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES_PER_USER", "20"))
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "15"))  # Cooldown duration
 
 #######################################
@@ -212,7 +212,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['persona'] = kasper_persona
 
     await update.message.reply_text(
-        "👻 **KASPER is here!** 👻\n\nA fresh conversation has started. You have 15 daily messages. Let's chat! 💬",
+        "👻 **KASPER is here!** 👻\n\nA fresh conversation has started. You have 20 daily messages. Let's chat! 💬",
         parse_mode="Markdown"
     )
     logger.info(f"User {user_id} started a new session.")
@@ -220,7 +220,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles incoming text messages:
-    1. Enforce rate-limit (15 / 24h)
+    1. Enforce rate-limit (20 / 24h)
     2. Enforce 45-second cooldown between messages
     3. Generate response using OpenAI
     4. TTS with ElevenLabs
@@ -371,7 +371,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-    logger.info("👻 KASPER Telegram Bot: OpenAI Chat Completion + ElevenLabs TTS + 15/day limit started. 👻")
+    logger.info("👻 KASPER Telegram Bot: OpenAI Chat Completion + ElevenLabs TTS + 20/day limit started. 👻")
 
     # Register shutdown signals
     loop = asyncio.get_event_loop()
