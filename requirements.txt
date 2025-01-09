@@ -3,6 +3,7 @@ python-telegram-bot==20.3
 requests==2.31.0
 pydub==0.25.1
 elevenlabs==1.50.3
+python-dotenv==1.0.0
 websockets==11.0.3
 openai
-httpx
+httpx==0.24.0
